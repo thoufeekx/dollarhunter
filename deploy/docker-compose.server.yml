@@ -1,0 +1,79 @@
+# Dollar Hunter on a shared server. Fully self-contained: own project, network and volumes, no published
+# ports (traffic arrives through its own Cloudflare tunnel), hard CPU/memory caps and capped logs.
+# Everything here carries the label com.dollarhunter=1 so uninstall.sh can remove exactly this and nothing else.
+name: dollarhunter
+
+x-logs: &logs
+  logging:
+    driver: json-file
+    options: {max-size: "5m", max-file: "2"}  # oldest log file is dropped first; 10 MB max per container
+
+x-app: &app
+  image: dollarhunter-app:current
+  env_file: [.env]
+  environment:
+    DH_DATABASE_URL: postgresql+psycopg://dollarhunter:${DH_DB_PASSWORD}@db:5432/dollarhunter
+    DH_STORAGE_DIR: /data/private_uploads
+  volumes: [uploads:/data/private_uploads]
+  depends_on:
+    db: {condition: service_healthy}
+  restart: unless-stopped
+  labels: {com.dollarhunter: "1"}
+  <<: *logs
+
+services:
+  db:
+    image: postgres:16.15-alpine
+    environment:
+      POSTGRES_USER: dollarhunter
+      POSTGRES_PASSWORD: ${DH_DB_PASSWORD}
+      POSTGRES_DB: dollarhunter
+    command: ["postgres", "-c", "shared_buffers=64MB", "-c", "max_connections=20", "-c", "work_mem=4MB",
+              "-c", "maintenance_work_mem=32MB", "-c", "effective_cache_size=192MB"]
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dollarhunter"]
+      interval: 10s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+    mem_limit: 384m
+    cpus: 0.5
+    labels: {com.dollarhunter: "1"}
+    <<: *logs
+
+  web:
+    <<: *app
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1",
+              "--proxy-headers", "--forwarded-allow-ips", "*"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:8000/healthz')"]
+      interval: 15s
+      timeout: 3s
+      retries: 10
+    mem_limit: 384m
+    cpus: 0.5
+
+  worker:
+    <<: *app
+    command: ["python", "-m", "app.worker"]
+    mem_limit: 256m
+    cpus: 0.25
+
+  tunnel:
+    image: cloudflare/cloudflared:2026.10.2
+    command: ["tunnel", "--config", "/etc/cloudflared/config.yml", "run"]
+    volumes: [./cloudflared:/etc/cloudflared:ro]
+    depends_on: [web]
+    restart: unless-stopped
+    mem_limit: 64m
+    cpus: 0.1
+    labels: {com.dollarhunter: "1"}
+    <<: *logs
+
+volumes:
+  pgdata: {labels: {com.dollarhunter: "1"}}
+  uploads: {labels: {com.dollarhunter: "1"}}
+
+networks:
+  default: {labels: {com.dollarhunter: "1"}}

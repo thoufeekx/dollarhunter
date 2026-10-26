@@ -1,0 +1,12 @@
+[Unit]
+Description=Daily Dollar Hunter self-maintenance
+
+[Timer]
+# 04:45 UTC daily, clear of SceneSmith's Sunday 03:30 maintenance window
+OnCalendar=*-*-* 04:45
+Persistent=true
+RandomizedDelaySec=10m
+Unit=dollarhunter-maintenance.service
+
+[Install]
+WantedBy=timers.target

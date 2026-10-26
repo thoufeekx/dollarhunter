@@ -1,0 +1,50 @@
+<!doctype html><html lang="en"><head>{% include "_style.html" %}<title>Demo chat</title>
+<style>
+.chat{border:1px solid var(--line);border-radius:12px;padding:12px;min-height:240px;max-height:55vh;overflow:auto;margin:12px 0}
+.b{max-width:85%;padding:8px 12px;border-radius:14px;margin:6px 0;white-space:pre-wrap;word-wrap:break-word}
+.in{background:var(--accent);color:#fff;margin-left:auto}.out{background:var(--line)}
+.row{display:flex;gap:8px;margin:8px 0}.row>*{flex:1}.row>.btn{flex:0 0 auto}
+</style></head><body>
+<h1>Demo chat</h1>
+<p class="muted">Simulated texts for demo numbers only. Nothing is sent by SMS and nothing is ordered.</p>
+<div class="row"><input id="tok" type="text" placeholder="Admin token" autocomplete="off"></div>
+<div class="row"><input id="phone" type="tel" value="+14165550101" aria-label="Demo phone number"></div>
+<div class="chat" id="chat" aria-live="polite"></div>
+<form class="row" id="f"><input id="text" type="text" placeholder="Try: 2 avocados, toothpaste" autocomplete="off"><button class="btn">Send</button></form>
+<div class="row"><input id="file" type="file" accept="image/*" aria-label="Receipt photo"><button class="btn sec" id="up" type="button">Send receipt</button></div>
+<p class="muted">Try: hi &rarr; L3T 1A1 &rarr; 2 avocados, toothpaste, paper towels &rarr; QUOTE &rarr; YES and the code.</p>
+<div class="note" id="err" hidden></div>
+<script>
+const $ = id => document.getElementById(id);
+try { $("tok").value = sessionStorage.getItem("dh_tok") || ""; } catch (e) {}
+$("tok").onchange = () => { try { sessionStorage.setItem("dh_tok", $("tok").value); } catch (e) {} };
+const hdr = () => ({"X-Admin-Token": $("tok").value});
+function err(t) { $("err").hidden = !t; $("err").textContent = t || ""; }
+async function load() {
+  if (!$("tok").value) return;
+  const r = await fetch("/demo/conversation?phone=" + encodeURIComponent($("phone").value), {headers: hdr()});
+  if (!r.ok) { err(r.status === 404 ? "Wrong admin token." : (await r.json()).detail); return; }
+  err("");
+  const chat = $("chat"), atEnd = chat.scrollTop + chat.clientHeight >= chat.scrollHeight - 20;
+  chat.replaceChildren(...(await r.json()).messages.map(m => {
+    const d = document.createElement("div"); d.className = "b " + m.dir; d.textContent = m.text; return d; }));
+  if (atEnd) chat.scrollTop = chat.scrollHeight;
+}
+$("f").onsubmit = async e => {
+  e.preventDefault(); const text = $("text").value.trim(); if (!text) return;
+  const r = await fetch("/demo/inbound", {method: "POST", headers: {...hdr(), "Content-Type": "application/json"},
+    body: JSON.stringify({phone: $("phone").value, text})});
+  if (!r.ok) { err(r.status === 404 ? "Wrong admin token." : (await r.json()).detail); return; }
+  $("text").value = ""; setTimeout(load, 400);
+};
+$("up").onclick = async () => {
+  const f = $("file").files[0]; if (!f) return;
+  const fd = new FormData(); fd.append("phone", $("phone").value); fd.append("file", f);
+  const r = await fetch("/demo/receipt", {method: "POST", headers: hdr(), body: fd});
+  if (!r.ok) { err(r.status === 404 ? "Wrong admin token." : (await r.json()).detail); return; }
+  $("file").value = ""; setTimeout(load, 1500);
+};
+$("phone").onchange = load;
+setInterval(load, 2000); load();
+</script>
+</body></html>

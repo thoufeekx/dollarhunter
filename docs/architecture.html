@@ -1,0 +1,201 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Dollar Hunter: architecture</title>
+<style>
+@page{size:A4;margin:16mm 14mm}
+body{font-family:-apple-system,"Helvetica Neue",Arial,sans-serif;color:#15201a;font-size:10.5pt;line-height:1.45;margin:0}
+h1{font-size:24pt;color:#0b3d2a;margin:0 0 2mm}h2{font-size:14pt;color:#0b3d2a;margin:0 0 2mm;border-bottom:2px solid #f2c94c;padding-bottom:1mm}
+.sub{color:#55615a;margin:0 0 6mm}.page{page-break-after:always}.page:last-child{page-break-after:auto}
+p{margin:1.5mm 0}ul{margin:1mm 0 2mm;padding-left:5mm}li{margin:.6mm 0}
+.mermaid{display:flex;justify-content:center;margin:3mm 0}.mermaid svg{max-width:100%;max-height:200mm;height:auto}
+table{border-collapse:collapse;width:100%;font-size:9.5pt;margin:2mm 0}td,th{border:1px solid #e4dccb;padding:1.5mm 2mm;text-align:left;vertical-align:top}
+th{background:#f7f3ea}.k{font-weight:600;color:#0b3d2a}
+</style>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10.9.1/dist/mermaid.min.js"></script>
+<script>mermaid.initialize({startOnLoad:true,theme:"base",flowchart:{curve:"basis",htmlLabels:true},
+themeVariables:{primaryColor:"#e9f5ee",primaryBorderColor:"#1f7a4d",primaryTextColor:"#15201a",lineColor:"#55615a",fontSize:"13px",secondaryColor:"#fff7e0",tertiaryColor:"#f7f3ea"}});</script>
+</head><body>
+
+<section class="page">
+<h1>Dollar Hunter</h1>
+<p class="sub">Architecture and logic, end to end. A grocery-savings assistant that works entirely by text message.</p>
+<h2>1. The system at a glance</h2>
+<p>A customer texts a phone number. Everything else happens on one small server: the message is stored, an AI agent
+works out what they mean, code looks up this week's flyer prices near them, and a quote goes back by SMS.</p>
+<div class="mermaid">
+flowchart LR
+  C([Customer's phone]) -- "SMS / MMS:<br/>list, photo, PDF, voice" --> TW[Twilio]
+  TW -- "signed webhook" --> CF[Cloudflare<br/>custom hostname + tunnel]
+  CF --> WEB[Web app<br/>FastAPI]
+  WEB -- "store message + job" --> DB[(Postgres<br/>customers, baskets,<br/>flyer catalog, quotes)]
+  DB --> WK[Worker]
+  WK --> AG{{AI agent}}
+  AG -- "conversation" --> OR[OpenRouter<br/>Claude Haiku 5.5 / GPT-6 Luna]
+  AG -- "which product is it?" --> JEV[Jev decision model]
+  AG --> DB
+  WK -- "flyers, twice a day" --> FL[Flipp flyers]
+  WK -- "fallback prices" --> FC[Firecrawl<br/>store websites]
+  WK -- "receipts, voice" --> AI2[Gemini Flash-Lite<br/>Voxtral]
+  WK -- "files, 7 days" --> R2[(Cloudflare R2)]
+  WK -- "outbox" --> TW
+  TW -- "quote by SMS" --> C
+</div>
+<table><tr><th>Part</th><th>Job</th></tr>
+<tr><td class="k">Web app</td><td>Receives the Twilio webhook, checks its signature, saves the message and a job, and answers Twilio in milliseconds. Also serves the landing page.</td></tr>
+<tr><td class="k">Worker</td><td>Runs the jobs: the agent, receipt and voice processing, sending texts, flyer downloads, clean-up.</td></tr>
+<tr><td class="k">Postgres</td><td>The memory: one customer per phone number, with their location, preferences, baskets, quotes, messages, plus the shared flyer catalog.</td></tr>
+<tr><td class="k">Models</td><td>The conversation model understands people and calls tools. Jev only picks matching products. Neither ever writes a price.</td></tr>
+</table>
+</section>
+
+<section class="page">
+<h2>2. One message, end to end</h2>
+<p>What happens between "need milk, eggs and a bag of apples, what's the total?" and the quote arriving (typically 2 to 6 seconds).</p>
+<div class="mermaid">
+sequenceDiagram
+  autonumber
+  participant P as Phone
+  participant T as Twilio
+  participant W as Web app
+  participant D as Postgres
+  participant K as Worker + agent
+  participant M as Chat model
+  participant J as Jev
+  P->>T: SMS
+  T->>W: webhook (signed)
+  W->>W: verify signature, ignore duplicates
+  W->>D: save message + job
+  W-->>T: 200 OK (no waiting on AI)
+  K->>D: claim job, load profile, basket, last messages
+  alt STOP / HELP / START / YES code
+    K->>D: handled by plain code, no model
+  else everything else
+    K->>M: profile + conversation + message + tools
+    M-->>K: update_basket(milk, eggs, apples: bag)
+    K->>D: save basket lines
+    M-->>K: price_basket()
+    K->>D: search local flyer catalog (milliseconds)
+    K->>J: one request: best product per item per store
+    J-->>K: picks with confidence
+    K->>K: plan 1-3 store trip, totals, savings
+    K->>D: save quote + outgoing SMS
+  end
+  K->>T: send SMS from outbox
+  T->>P: quote with flyer links
+</div>
+</section>
+
+<section class="page">
+<h2>3. Where the data comes from</h2>
+<p>Prices are gathered ahead of time, so answering is a database lookup, not a slow web search.</p>
+<div class="mermaid">
+flowchart TB
+  PC["Postal code from the customer<br/>(K2C 0C1, or just K2C)"] --> GEO["GeoNames postal areas<br/>bundled with the app"]
+  GEO --> AREA["Area: Ottawa, Carlington<br/>lat / lon"]
+  AREA --> NEW{"Catalog for this area<br/>fresh (under 12 h)?"}
+  NEW -- "no" --> BG["Background download<br/>(never blocks a reply)"]
+  BG --> LIST["Flipp: list every grocery<br/>and pharmacy flyer for the area"]
+  LIST --> ALL["Download each flyer in parallel<br/>about 9,000 items, 3-5 s"]
+  ALL --> CAT[("flyer_items table<br/>store, product, price,<br/>regular price, valid dates")]
+  NEW -- "yes" --> CAT
+  CAT --> SEARCH["Item search: whole-word match on the<br/>agent's keywords, English + French"]
+  SEARCH --> HIT{"Found in a flyer?"}
+  HIT -- "yes" --> CAND["Candidates per store"]
+  HIT -- "no" --> ONLINE["Live search: regular online prices<br/>(mostly walmart.ca)"]
+  ONLINE --> HIT2{"Found?"}
+  HIT2 -- "yes" --> CAND
+  HIT2 -- "no" --> WEBP["Firecrawl reads store websites<br/>(Metro, No Frills), capped per day"]
+  WEBP --> CAND
+  AREA -.-> OSM["OpenStreetMap: store names and<br/>addresses, background only"]
+  CRON["Worker, hourly"] -.-> NEW
+</div>
+<ul>
+<li><b>Regular price</b> comes from the flyer's own discount (a 36% off item gives its regular price), so savings are checkable. Items without it carry no saving and no fee.</li>
+<li><b>Caching:</b> flyer catalog 12 h per area, live searches 6 h, website prices 3 days, store lists 7 days, Jev decisions 6 h (the same basket always gets the same picks).</li>
+<li><b>Honest limits:</b> Flipp has no official API; this uses the endpoints its own app uses. Store websites show their default branch.</li>
+</ul>
+</section>
+
+<section class="page">
+<h2>4. How the agent thinks</h2>
+<p>The conversation model decides what to do; code does everything involving money, and checks the model's work.</p>
+<div class="mermaid">
+flowchart TB
+  IN["Incoming text<br/>(or a transcribed voice note,<br/>or a receipt summary)"] --> FIXED{"STOP / HELP / START<br/>or YES + 6-digit code?"}
+  FIXED -- "yes" --> CODE["Handled by plain code"]
+  FIXED -- "no" --> CTX["Build context from the database:<br/>location, saved preferences, basket,<br/>previous list, open quote, last 16 messages"]
+  CTX --> LLM["Conversation model<br/>Claude Haiku 5.5"]
+  LLM --> QUIET{"Empty answer?"}
+  QUIET -- "yes" --> BACKUP["Ask the backup model<br/>GPT-6 Luna"] --> TOOLS
+  QUIET -- "no" --> TOOLS{"Tool calls?"}
+  TOOLS -- "yes" --> RUN["Run each tool in its own<br/>safe database savepoint"]
+  RUN --> TXT{"Did a tool text the customer<br/>(quote, options, links)?"}
+  TXT -- "yes" --> DONE([Done: no extra SMS])
+  TXT -- "no" --> LLM
+  TOOLS -- "no, a text reply" --> CLAIM{"Says it added or removed<br/>something without doing it?"}
+  CLAIM -- "yes" --> REDO["Send back: actually do it"] --> LLM
+  CLAIM -- "no" --> PRICE{"Writes its own prices?"}
+  PRICE -- "yes" --> REDO2["Send back: no prices,<br/>use the pricing tools"] --> LLM
+  PRICE -- "no" --> SEND([Send the reply])
+</div>
+<table><tr><th>Tool</th><th>What it does</th></tr>
+<tr><td class="k">set_location, find_stores</td><td>Save the postal area; name the chains with flyers there.</td></tr>
+<tr><td class="k">update_basket</td><td>Add, change or remove items with quantity, size, brand, search keywords and a short description of what this customer means.</td></tr>
+<tr><td class="k">show_options, choose_option</td><td>Text the cheapest real options for one item; pin the one they pick.</td></tr>
+<tr><td class="k">price_basket</td><td>Plan the trip and text the quote (balanced, cheapest anywhere, fewest stops, or one named store).</td></tr>
+<tr><td class="k">send_links</td><td>Direct flyer link for each item in the quote.</td></tr>
+<tr><td class="k">remember, forget, clear_basket, copy_last_order, set_budget, accept_receipt_items</td><td>Memory and list management.</td></tr>
+</table>
+</section>
+
+<section class="page">
+<h2>5. From basket to quote</h2>
+<div class="mermaid">
+flowchart TB
+  B["Basket lines<br/>name, size, brand,<br/>keywords, details"] --> S["Search local catalog<br/>per line"]
+  S --> J["Jev: for every line and store,<br/>which product is it? (one request)"]
+  J --> M["Best match per<br/>item per store"]
+  M --> P["Trip planner: every 1-3 store<br/>combination; each item at the<br/>cheapest store in the trip"]
+  P --> SC["Score = total + $3 per extra stop<br/>(or cheapest / fewest / one store)"]
+  SC --> Q["Quote: lines per store, flyer link per<br/>store, savings vs regular, alternatives"]
+  Q --> SMS([SMS])
+</div>
+<ul>
+<li><b>Savings</b> = regular price minus flyer price, only where the flyer states the regular price. <b>Fee</b> = 25% of verified savings; none without them.</li>
+<li><b>Alternatives shown with every quote:</b> buying everything at one store, the absolute cheapest spread, or the fewest stops, so the customer sees the trade-off.</li>
+<li>Texts are kept in the GSM-7 alphabet (symbols such as ® removed, bilingual names reduced to English), which keeps the number of billed SMS segments down.</li>
+</ul>
+<h2>6. Memory per phone number</h2>
+<div class="mermaid">
+flowchart TB
+  NUM(["Phone number"]) --> CUS["Customer<br/>location, saved preferences,<br/>previous list, consent"]
+  CUS --> BAS["Current basket<br/>items, notes for this shop, budget"]
+  CUS --> HIS["Messages in and out"]
+  CUS --> REC["Receipts and their lines<br/>(files deleted after 7 days)"]
+  BAS --> QUO["Quotes<br/>prices, stores, links, savings"]
+  QUO --> ORD["Orders and savings ledger<br/>(not used: quotes only)"]
+</div>
+<p>"Clear my list" empties only the basket. The old list stays as <i>previous list</i>, so the agent can say what was on it and add items back on request; preferences, location and history stay.</p>
+</section>
+
+<section class="page">
+<h2>7. Running it: isolation and upkeep</h2>
+<div class="mermaid">
+flowchart TB
+  subgraph HOST["Shared server (other apps untouched)"]
+    subgraph DH["Dollar Hunter: own folder, network, volumes"]
+      T2["tunnel<br/>64 MB"] --> W2["web<br/>384 MB"]
+      W2 --> D2[("Postgres<br/>384 MB")]
+      K2["worker<br/>256 MB"] --> D2
+    end
+    TIMER["Daily timer: backup to R2 (keep 7),<br/>prune build cache, old images, logs"] -.-> DH
+  end
+  NET(["Internet"]) --> CFT["Cloudflare: custom hostname<br/>to tunnel, no open ports"] --> T2
+  DEP["deploy.sh from a laptop"] -- "snapshot other apps,<br/>build, migrate, start,<br/>snapshot again, fail on any change" --> HOST
+</div>
+<ul>
+<li><b>No ports published:</b> traffic arrives only through the Dollar Hunter Cloudflare tunnel; nothing else on the host is touched.</li>
+<li><b>Self-cleaning:</b> logs capped at 10 MB per container, receipts deleted after 7 days, finished jobs after 14 days, messages after 90 days, previous and current image kept for rollback.</li>
+<li><b>Removal:</b> one script deletes its containers, volumes, images, build cache, timer and folder.</li>
+<li><b>Costs per message:</b> chat model about $0.002, Jev about $0.0004, a receipt under $0.001, a quote 3 to 5 SMS segments.</li>
+</ul>
+</section>
+</body></html>

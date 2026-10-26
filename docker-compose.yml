@@ -1,0 +1,41 @@
+x-app: &app
+  build: .
+  restart: unless-stopped
+  env_file: [.env]
+  environment:
+    DH_DATABASE_URL: postgresql+psycopg://dollarhunter:dollarhunter@db:5432/dollarhunter
+    DH_STORAGE_DIR: /data/private_uploads
+  volumes:
+    - uploads:/data/private_uploads
+  depends_on:
+    db: {condition: service_healthy}
+
+services:
+  db:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: dollarhunter
+      POSTGRES_PASSWORD: dollarhunter
+      POSTGRES_DB: dollarhunter
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dollarhunter"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+  web:
+    <<: *app
+    ports: ["8000:8000"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:8000/healthz')"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+  worker:
+    <<: *app
+    command: ["python", "-m", "app.worker"]
+
+volumes:
+  pgdata:
+  uploads:

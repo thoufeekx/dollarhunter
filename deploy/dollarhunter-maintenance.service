@@ -1,0 +1,10 @@
+[Unit]
+Description=Dollar Hunter self-maintenance (backup, cache and image cleanup)
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/dollarhunter/maintain.sh
+Nice=10
+IOSchedulingClass=idle

@@ -1,0 +1,14 @@
+# Local development only: run the checked-out code without rebuilding the image.
+x-src: &src
+  - ./app:/srv/app
+  - ./templates:/srv/templates
+  - ./tests:/srv/tests
+  - ./migrations:/srv/migrations
+  - uploads:/data/private_uploads
+
+services:
+  web:
+    volumes: *src
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload", "--reload-dir", "app", "--reload-dir", "templates"]
+  worker:
+    volumes: *src

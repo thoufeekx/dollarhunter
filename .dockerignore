@@ -1,0 +1,11 @@
+.env
+.git
+data
+__pycache__
+.pytest_cache
+docker-compose.override.yml
+deploy
+scripts
+tests
+env.vibedata
+.env.*

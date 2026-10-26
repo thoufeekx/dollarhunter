@@ -1,0 +1,10 @@
+.env
+*.pyc
+__pycache__/
+.pytest_cache/
+data/
+.venv/
+*.egg-info/
+env.vibedata
+.env.*
+!.env.example

@@ -1,0 +1,13 @@
+.git/
+.env
+.env.*
+env.vibedata
+data/
+tests/
+scripts/
+deploy/
+docker-compose.override.yml
+docker-compose.yml
+Makefile
+__pycache__/
+.pytest_cache/
